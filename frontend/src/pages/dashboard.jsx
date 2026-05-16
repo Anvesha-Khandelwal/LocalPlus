@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { salesAPI, udhaarAPI, productsAPI } from '../api/client'
+import { salesAPI, udhaarAPI, productsAPI } from '../src/api/client'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
 import { TrendingUp, Package, BookOpen, ShoppingCart } from 'lucide-react'
 

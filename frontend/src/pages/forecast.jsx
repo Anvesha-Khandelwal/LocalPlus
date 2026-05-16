@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { productsAPI, forecastAPI } from '../api/client'
+import { productsAPI, forecastAPI } from '../src/api/client'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, CartesianGrid } from 'recharts'
 import { Brain, AlertTriangle, CheckCircle } from 'lucide-react'
 import toast from 'react-hot-toast'

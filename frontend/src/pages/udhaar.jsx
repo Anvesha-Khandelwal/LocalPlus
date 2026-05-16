@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { udhaarAPI } from '../api/client'
+import { udhaarAPI } from '../src/api/client'
 import { Plus, CheckCircle, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 

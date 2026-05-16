@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { productsAPI, salesAPI } from '../api/client'
+import { productsAPI, salesAPI } from '../src/api/client'
 import { Plus, Minus, Trash2, CheckCircle } from 'lucide-react'
 import toast from 'react-hot-toast'
 
