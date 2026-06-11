@@ -1,0 +1,82 @@
+/* frontend/app/globals.css
+   Design tokens and global resets for the AI Business Copilot.
+   Dark navy base — feels professional, reduces eye strain for all-day use.
+*/
+
+:root {
+  --bg:        #080e1a;
+  --surface:   #0d1526;
+  --surface-2: #111f36;
+  --border:    #1a2540;
+  --border-2:  #243050;
+
+  --amber:  #f59e0b;
+  --amber-2:#fbbf24;
+  --green:  #4ade80;
+  --red:    #f87171;
+  --blue:   #60a5fa;
+  --orange: #fb923c;
+
+  --text:   #e2e8f0;
+  --text-2: #94a3b8;
+  --muted:  #64748b;
+
+  --font-serif: 'Instrument Serif', Georgia, serif;
+  --font-sans:  'Syne', system-ui, sans-serif;
+  --font-mono:  'IBM Plex Mono', 'Courier New', monospace;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  --sidebar-width: 240px;
+  --sidebar-collapsed: 64px;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { color-scheme: dark; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* App shell — sidebar + main area side by side */
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1;
+  min-width: 0;            /* prevents flex child overflow */
+  overflow-x: hidden;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+/* Focus ring */
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Typography */
+h1, h2, h3 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em; }
+code, pre   { font-family: var(--font-mono); }
+
+/* Utility classes */
+.mono { font-family: var(--font-mono); }
+.serif { font-family: var(--font-serif); }
+.muted { color: var(--muted); }
+.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
