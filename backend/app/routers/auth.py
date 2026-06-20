@@ -31,7 +31,7 @@ class RegisterRequest(BaseModel):
     business_name: str = Field(..., min_length=2, max_length=100)
     owner_name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=128)
+    password: str = Field(..., min_length=8, max_length=72)
     phone: str | None = Field(None, pattern=r"^\+?[0-9]{10,15}$")
 
     @field_validator("password")
@@ -82,7 +82,7 @@ class UpdateProfileRequest(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=100)
     phone: str | None = Field(None, pattern=r"^\+?[0-9]{10,15}$")
     current_password: str | None = None
-    new_password: str | None = Field(None, min_length=8, max_length=128)
+    new_password: str | None = Field(None, min_length=8, max_length=72)
 
 
 class InviteRequest(BaseModel):
@@ -93,15 +93,21 @@ class InviteRequest(BaseModel):
 
 class AcceptInviteRequest(BaseModel):
     token: str
-    password: str = Field(..., min_length=8, max_length=128)
+    password: str = Field(..., min_length=8, max_length=72)
 
 
 def hash_password(plain: str) -> str:
-    return pwd_context.hash(plain)
+    # Bcrypt has a 72-byte limit for passwords
+    # Truncate to 72 bytes as a safety measure
+    truncated = plain.encode()[:72].decode(errors='ignore')
+    return pwd_context.hash(truncated)
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    # Bcrypt has a 72-byte limit for passwords
+    # Truncate to 72 bytes as a safety measure
+    truncated = plain.encode()[:72].decode(errors='ignore')
+    return pwd_context.verify(truncated, hashed)
 
 
 def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
