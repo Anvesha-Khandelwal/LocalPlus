@@ -1,0 +1,40 @@
+# requirements-core.txt
+# Minimal set to run the app — auth, inventory, sales, dashboard, AI chat/marketing/OCR.
+# Excludes heavy ML packages (pandas/prophet/xgboost/scikit-learn) that need a C++ compiler
+# to build on some Windows machines. Install this first to get the app running.
+# Once it works, separately try requirements-ml.txt for forecasting features.
+
+# Web framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# Database
+sqlalchemy==2.0.35
+asyncpg==0.31.0
+alembic==1.13.2
+
+# Redis
+redis==5.0.8
+
+# Auth / Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+pydantic[email]==2.8.2
+pydantic-settings==2.4.0
+
+# HTTP client (for LLM API calls)
+httpx==0.27.2
+
+# Background tasks
+celery==5.4.0
+kombu==5.3.4
+
+# OCR
+pytesseract==0.3.13
+Pillow==10.4.0
+pdf2image==1.17.0
+
+# Utilities
+python-dotenv==1.0.1
+boto3==1.35.0

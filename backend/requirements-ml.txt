@@ -1,0 +1,11 @@
+# requirements-ml.txt
+# Optional ML/forecasting packages. Install AFTER requirements-core.txt works.
+# These need pre-built wheels — if they fail to compile, you likely need
+# Microsoft C++ Build Tools, or should use Docker instead for these features.
+
+scikit-learn==1.5.2
+prophet==1.1.5
+xgboost==2.1.1
+pandas==2.2.2
+numpy==1.26.4
+mlxtend==0.23.1

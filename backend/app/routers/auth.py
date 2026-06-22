@@ -97,10 +97,7 @@ class AcceptInviteRequest(BaseModel):
 
 
 def hash_password(plain: str) -> str:
-    # Bcrypt has a 72-byte limit for passwords
-    # Truncate to 72 bytes as a safety measure
-    truncated = plain.encode()[:72].decode(errors='ignore')
-    return pwd_context.hash(truncated)
+    return pwd_context.hash(plain[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
