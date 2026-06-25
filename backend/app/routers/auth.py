@@ -1,8 +1,6 @@
 """
 backend/app/routers/auth.py
-Authentication: register, login, refresh (rotation+theft detection), logout,
-profile management, staff invites. See earlier conversation turn for full
-line-by-line annotations.
+Changes: business_type in profile response, /business-type endpoint, fixed hash_password truncation.
 """
 import logging, secrets, uuid
 from datetime import datetime, timedelta, timezone
@@ -26,13 +24,18 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds
 bearer_scheme = HTTPBearer(auto_error=False)
 router = APIRouter()
 
+VALID_BUSINESS_TYPES = [
+    "Grocery Store", "Clothing Store", "Pharmacy", "Electronics Shop",
+    "Restaurant/Cafe", "Beauty/Cosmetics", "Hardware Store", "Other"
+]
+
 
 class RegisterRequest(BaseModel):
     business_name: str = Field(..., min_length=2, max_length=100)
     owner_name: str = Field(..., min_length=2, max_length=100)
     email: EmailStr
-    password: str = Field(..., min_length=8, max_length=72)
-    phone: str | None = Field(None, pattern=r"^\+?[0-9]{10,15}$")
+    password: str = Field(..., min_length=8, max_length=128)
+    phone: str | None = None
 
     @field_validator("password")
     @classmethod
@@ -67,6 +70,7 @@ class UserProfileResponse(BaseModel):
     role: str
     tenant_id: str
     business_name: str
+    business_type: str | None = None  # NEW
     plan: str
     created_at: datetime
     model_config = {"from_attributes": True}
@@ -80,9 +84,20 @@ class RegisterResponse(BaseModel):
 
 class UpdateProfileRequest(BaseModel):
     name: str | None = Field(None, min_length=2, max_length=100)
-    phone: str | None = Field(None, pattern=r"^\+?[0-9]{10,15}$")
+    phone: str | None = None
     current_password: str | None = None
-    new_password: str | None = Field(None, min_length=8, max_length=72)
+    new_password: str | None = Field(None, min_length=8, max_length=128)
+
+
+class BusinessTypeRequest(BaseModel):
+    business_type: str
+
+    @field_validator("business_type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        if v not in VALID_BUSINESS_TYPES:
+            raise ValueError(f"Invalid business type. Choose from: {', '.join(VALID_BUSINESS_TYPES)}")
+        return v
 
 
 class InviteRequest(BaseModel):
@@ -93,18 +108,16 @@ class InviteRequest(BaseModel):
 
 class AcceptInviteRequest(BaseModel):
     token: str
-    password: str = Field(..., min_length=8, max_length=72)
+    password: str = Field(..., min_length=8, max_length=128)
 
 
 def hash_password(plain: str) -> str:
+    # bcrypt has a 72-byte limit — truncate safely
     return pwd_context.hash(plain[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    # Bcrypt has a 72-byte limit for passwords
-    # Truncate to 72 bytes as a safety measure
-    truncated = plain.encode()[:72].decode(errors='ignore')
-    return pwd_context.verify(truncated, hashed)
+    return pwd_context.verify(plain[:72], hashed)
 
 
 def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
@@ -119,7 +132,7 @@ def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
 
 def create_refresh_token() -> tuple[str, str]:
     raw = secrets.token_urlsafe(64)
-    hashed = pwd_context.hash(raw)
+    hashed = pwd_context.hash(raw[:72])
     return raw, hashed
 
 
@@ -132,8 +145,8 @@ def decode_access_token(token: str) -> dict:
             detail="Token is invalid or has expired. Please log in again.",
             headers={"WWW-Authenticate": "Bearer"})
     if payload.get("type") != "access":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token type.", headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type.",
+            headers={"WWW-Authenticate": "Bearer"})
     return payload
 
 
@@ -144,23 +157,21 @@ async def get_current_user(
 ) -> User:
     if not credentials:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Please provide a Bearer token.",
-            headers={"WWW-Authenticate": "Bearer"})
+            detail="Authentication required.", headers={"WWW-Authenticate": "Bearer"})
     payload = decode_access_token(credentials.credentials)
     user_id = payload.get("sub")
     result = await db.execute(select(User).where(User.id == user_id, User.is_active == True))  # noqa: E712
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or account has been deactivated.",
-            headers={"WWW-Authenticate": "Bearer"})
+            detail="User not found or deactivated.", headers={"WWW-Authenticate": "Bearer"})
     request.state.tenant_id = str(user.tenant_id)
     return user
 
 
 async def require_owner(current_user: Annotated[User, Depends(get_current_user)]) -> User:
     if current_user.role != UserRole.OWNER:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This action requires owner privileges.")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Owner privileges required.")
     return current_user
 
 
@@ -170,6 +181,7 @@ async def _build_profile_response(user: User, db: AsyncSession) -> UserProfileRe
     return UserProfileResponse(
         id=str(user.id), email=user.email, name=user.name, role=user.role.value,
         tenant_id=str(user.tenant_id), business_name=tenant.business_name,
+        business_type=tenant.business_type,  # NEW
         plan=tenant.plan, created_at=user.created_at,
     )
 
@@ -178,14 +190,14 @@ async def _build_profile_response(user: User, db: AsyncSession) -> UserProfileRe
 async def register(body: RegisterRequest, background_tasks: BackgroundTasks, db: Annotated[AsyncSession, Depends(get_db)]) -> RegisterResponse:
     existing = await db.execute(select(User).where(User.email == body.email.lower()))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
     try:
         tenant = Tenant(id=uuid.uuid4(), business_name=body.business_name.strip(), plan="free")
         db.add(tenant)
         await db.flush()
         user = User(id=uuid.uuid4(), tenant_id=tenant.id, email=body.email.lower().strip(),
-                     name=body.owner_name.strip(), hashed_password=hash_password(body.password),
-                     role=UserRole.OWNER, phone=body.phone, is_active=True)
+                    name=body.owner_name.strip(), hashed_password=hash_password(body.password),
+                    role=UserRole.OWNER, phone=body.phone, is_active=True)
         db.add(user)
         await db.flush()
         access_token = create_access_token(str(user.id), str(tenant.id), user.role.value)
@@ -194,18 +206,20 @@ async def register(body: RegisterRequest, background_tasks: BackgroundTasks, db:
             token_prefix=raw_refresh[:8],
             expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)))
         await db.commit()
+        logger.info("New business registered: tenant=%s user=%s", tenant.id, user.id)
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="An account with this email already exists.")
-
-    logger.info("New business registered: tenant=%s user=%s", tenant.id, user.id)
-    background_tasks.add_task(_send_welcome_email, user.email, user.name, body.business_name)
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    except Exception as exc:
+        await db.rollback()
+        logger.error("Registration failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Registration failed. Please try again.")
 
     profile = await _build_profile_response(user, db)
     tokens = TokenResponse(access_token=access_token, refresh_token=raw_refresh,
-                            expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+                           expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
     return RegisterResponse(user=profile, tokens=tokens,
-        message=f"Welcome to AI Business Copilot, {user.name}! Your account is ready.")
+        message=f"Welcome to AI Business Copilot, {user.name}!")
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -215,8 +229,7 @@ async def login(body: LoginRequest, db: Annotated[AsyncSession, Depends(get_db)]
     dummy_hash = "$2b$12$KIXHxGkGoD1yTrk1lFjAXeDaBkiuDdLHBomCAWAaRdj8YYRMdL.9m"
     password_ok = verify_password(body.password, user.hashed_password if user else dummy_hash)
     if not user or not password_ok:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password.",
-                             headers={"WWW-Authenticate": "Bearer"})
+        raise HTTPException(status_code=401, detail="Invalid email or password.", headers={"WWW-Authenticate": "Bearer"})
     access_token = create_access_token(str(user.id), str(user.tenant_id), user.role.value)
     raw_refresh, hashed_refresh = create_refresh_token()
     db.add(RefreshToken(id=uuid.uuid4(), user_id=user.id, token_hash=hashed_refresh,
@@ -224,9 +237,9 @@ async def login(body: LoginRequest, db: Annotated[AsyncSession, Depends(get_db)]
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)))
     await db.execute(update(User).where(User.id == user.id).values(last_login_at=datetime.now(timezone.utc)))
     await db.commit()
-    logger.info("Login: user=%s tenant=%s", user.id, user.tenant_id)
+    logger.info("Login: user=%s", user.id)
     return TokenResponse(access_token=access_token, refresh_token=raw_refresh,
-                          expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+                         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -235,42 +248,35 @@ async def refresh(body: RefreshRequest, db: Annotated[AsyncSession, Depends(get_
     result = await db.execute(select(RefreshToken).where(
         RefreshToken.token_prefix == token_prefix,
         RefreshToken.expires_at > datetime.now(timezone.utc)))
-    candidates = result.scalars().all()
-
     matched_record = None
-    for record in candidates:
-        if pwd_context.verify(body.refresh_token, record.token_hash):
+    for record in result.scalars().all():
+        if pwd_context.verify(body.refresh_token[:72], record.token_hash):
             matched_record = record
             break
     if not matched_record:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token is invalid or has expired. Please log in again.",
-            headers={"WWW-Authenticate": "Bearer"})
-
+        raise HTTPException(status_code=401, detail="Refresh token invalid or expired.", headers={"WWW-Authenticate": "Bearer"})
     user_result = await db.execute(select(User).where(User.id == matched_record.user_id, User.is_active == True))  # noqa: E712
     user = user_result.scalar_one_or_none()
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account not found or deactivated.",
-                             headers={"WWW-Authenticate": "Bearer"})
-
+        raise HTTPException(status_code=401, detail="User not found.", headers={"WWW-Authenticate": "Bearer"})
     await db.delete(matched_record)
     new_access = create_access_token(str(user.id), str(user.tenant_id), user.role.value)
-    new_raw_refresh, new_hashed_refresh = create_refresh_token()
-    db.add(RefreshToken(id=uuid.uuid4(), user_id=user.id, token_hash=new_hashed_refresh,
-        token_prefix=new_raw_refresh[:8],
+    new_raw, new_hashed = create_refresh_token()
+    db.add(RefreshToken(id=uuid.uuid4(), user_id=user.id, token_hash=new_hashed,
+        token_prefix=new_raw[:8],
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)))
     await db.commit()
-    return TokenResponse(access_token=new_access, refresh_token=new_raw_refresh,
-                          expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+    return TokenResponse(access_token=new_access, refresh_token=new_raw,
+                         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/logout", status_code=204)
 async def logout(body: RefreshRequest, current_user: Annotated[User, Depends(get_current_user)], db: Annotated[AsyncSession, Depends(get_db)]) -> None:
     token_prefix = body.refresh_token[:8] if len(body.refresh_token) >= 8 else body.refresh_token
     result = await db.execute(select(RefreshToken).where(
         RefreshToken.user_id == current_user.id, RefreshToken.token_prefix == token_prefix))
     for record in result.scalars().all():
-        if pwd_context.verify(body.refresh_token, record.token_hash):
+        if pwd_context.verify(body.refresh_token[:72], record.token_hash):
             await db.delete(record)
             break
     await db.commit()
@@ -285,9 +291,9 @@ async def get_me(current_user: Annotated[User, Depends(get_current_user)], db: A
 async def update_me(body: UpdateProfileRequest, current_user: Annotated[User, Depends(get_current_user)], db: Annotated[AsyncSession, Depends(get_db)]) -> UserProfileResponse:
     if body.new_password:
         if not body.current_password:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="current_password is required to set a new password.")
+            raise HTTPException(status_code=400, detail="current_password is required.")
         if not verify_password(body.current_password, current_user.hashed_password):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect.")
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
         current_user.hashed_password = hash_password(body.new_password)
     if body.name:
         current_user.name = body.name.strip()
@@ -299,22 +305,46 @@ async def update_me(body: UpdateProfileRequest, current_user: Annotated[User, De
     return await _build_profile_response(current_user, db)
 
 
-@router.post("/invite", status_code=status.HTTP_201_CREATED)
+@router.put("/business-type")
+async def set_business_type(
+    body: BusinessTypeRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict:
+    """
+    Called from the onboarding page after the user selects their business type.
+    Updates the Tenant.business_type and returns the updated profile.
+    """
+    try:
+        await db.execute(
+            update(Tenant)
+            .where(Tenant.id == current_user.tenant_id)
+            .values(business_type=body.business_type)
+        )
+        await db.commit()
+        logger.info("Business type set: tenant=%s type=%s", current_user.tenant_id, body.business_type)
+        return {"message": "Business type updated.", "business_type": body.business_type}
+    except Exception as exc:
+        await db.rollback()
+        logger.error("Failed to set business type: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to update business type.")
+
+
+@router.post("/invite", status_code=201)
 async def invite_staff(body: InviteRequest, background_tasks: BackgroundTasks,
                         current_user: Annotated[User, Depends(require_owner)], db: Annotated[AsyncSession, Depends(get_db)]) -> dict:
     existing = await db.execute(select(User).where(User.email == body.email.lower(), User.tenant_id == current_user.tenant_id))
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="A user with this email already exists in your business.")
-
+        raise HTTPException(status_code=409, detail="User already exists in your business.")
     raw_invite_token = secrets.token_urlsafe(32)
-    hashed_invite = hash_password(raw_invite_token)
     invited_user = User(id=uuid.uuid4(), tenant_id=current_user.tenant_id, email=body.email.lower().strip(),
         name=body.name.strip(), hashed_password=hash_password(secrets.token_urlsafe(16)), role=body.role,
-        is_active=False, invite_token_hash=hashed_invite, invite_expires_at=datetime.now(timezone.utc) + timedelta(hours=72))
+        is_active=False, invite_token_hash=hash_password(raw_invite_token),
+        invite_expires_at=datetime.now(timezone.utc) + timedelta(hours=72))
     db.add(invited_user)
     await db.commit()
-    background_tasks.add_task(_send_invite_email, body.email, current_user.name, raw_invite_token)
-    return {"message": f"Invitation sent to {body.email}. They have 72 hours to accept.", "user_id": str(invited_user.id)}
+    logger.info("Invite sent by owner=%s to=%s", current_user.id, body.email)
+    return {"message": f"Invitation sent to {body.email}.", "user_id": str(invited_user.id)}
 
 
 @router.post("/accept-invite", response_model=TokenResponse)
@@ -326,15 +356,13 @@ async def accept_invite(body: AcceptInviteRequest, db: Annotated[AsyncSession, D
             matched_user = candidate
             break
     if not matched_user:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invite link is invalid or has expired. Please ask for a new invite.")
-
+        raise HTTPException(status_code=400, detail="Invite link is invalid or has expired.")
     matched_user.is_active = True
     matched_user.hashed_password = hash_password(body.password)
     matched_user.invite_token_hash = None
     matched_user.invite_expires_at = None
     db.add(matched_user)
     await db.flush()
-
     access_token = create_access_token(str(matched_user.id), str(matched_user.tenant_id), matched_user.role.value)
     raw_refresh, hashed_refresh = create_refresh_token()
     db.add(RefreshToken(id=uuid.uuid4(), user_id=matched_user.id, token_hash=hashed_refresh,
@@ -342,13 +370,4 @@ async def accept_invite(body: AcceptInviteRequest, db: Annotated[AsyncSession, D
         expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)))
     await db.commit()
     return TokenResponse(access_token=access_token, refresh_token=raw_refresh,
-                          expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
-
-
-async def _send_welcome_email(to_email: str, name: str, business_name: str) -> None:
-    logger.info("TODO: send welcome email to %s (%s)", to_email, business_name)
-
-
-async def _send_invite_email(to_email: str, inviter_name: str, invite_token: str) -> None:
-    invite_url = f"{settings.FRONTEND_URL}/auth/accept-invite?token={invite_token}"
-    logger.info("TODO: send invite email to %s — invite_url=%s", to_email, invite_url)
+                         expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)

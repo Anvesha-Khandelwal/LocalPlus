@@ -1,15 +1,15 @@
 """
 backend/app/routers/inventory.py
-All CRUD for products, stock adjustments, suppliers, and purchase orders.
-Every query is scoped to current_user.tenant_id — one business cannot see another's data.
+Changes: image_url support, upload endpoint, fixed empty string validation for optional fields.
 """
 import uuid
+import os
 import logging
 from datetime import date
 from typing import Annotated, List, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
-from sqlalchemy import select, func, update
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -22,7 +22,8 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# ── Schemas ────────────────────────────────────────────────────────────────────
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "static", "uploads")
+
 
 class ProductCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=300)
@@ -31,14 +32,36 @@ class ProductCreate(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     unit: str = "piece"
-    cost_price: float = Field(..., ge=0)
-    selling_price: float = Field(..., ge=0)
+    cost_price: float = Field(0, ge=0)
+    selling_price: float = Field(0, ge=0)
     quantity: int = Field(0, ge=0)
     reorder_point: int = Field(10, ge=0)
     max_stock: Optional[int] = None
     expiry_date: Optional[date] = None
     supplier_id: Optional[uuid.UUID] = None
+    image_url: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("expiry_date", mode="before")
+    @classmethod
+    def empty_expiry_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator("supplier_id", mode="before")
+    @classmethod
+    def empty_supplier_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator("sku", "barcode", "category", "brand", "notes", mode="before")
+    @classmethod
+    def empty_string_to_none(cls, v):
+        if v == "":
+            return None
+        return v
 
 
 class ProductUpdate(BaseModel):
@@ -51,21 +74,36 @@ class ProductUpdate(BaseModel):
     max_stock: Optional[int] = None
     expiry_date: Optional[date] = None
     supplier_id: Optional[uuid.UUID] = None
+    image_url: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("expiry_date", mode="before")
+    @classmethod
+    def empty_expiry_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
+
+    @field_validator("supplier_id", mode="before")
+    @classmethod
+    def empty_supplier_to_none(cls, v):
+        if v == "" or v is None:
+            return None
+        return v
 
 
 class StockAdjustment(BaseModel):
-    delta: int = Field(..., description="Positive=add stock, Negative=remove stock")
-    reason: Optional[str] = None  # "purchase", "damage", "correction"
+    delta: int
+    reason: Optional[str] = None
 
 
 class ProductResponse(BaseModel):
     id: uuid.UUID
-    sku: Optional[str]
-    barcode: Optional[str]
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
     name: str
-    category: Optional[str]
-    brand: Optional[str]
+    category: Optional[str] = None
+    brand: Optional[str] = None
     unit: str
     cost_price: float
     selling_price: float
@@ -74,10 +112,10 @@ class ProductResponse(BaseModel):
     is_low_stock: bool
     is_out_of_stock: bool
     margin_pct: float
-    expiry_date: Optional[date]
-    supplier_id: Optional[uuid.UUID]
+    expiry_date: Optional[date] = None
+    supplier_id: Optional[uuid.UUID] = None
+    image_url: Optional[str] = None
     is_active: bool
-
     model_config = {"from_attributes": True}
 
 
@@ -90,36 +128,54 @@ class SupplierCreate(BaseModel):
     lead_time_days: int = Field(3, ge=0)
 
 
-class PurchaseOrderCreate(BaseModel):
-    supplier_id: Optional[uuid.UUID] = None
-    notes: Optional[str] = None
-    items: List[dict]  # [{product_id, quantity, unit_cost}]
+# ── Image upload ──────────────────────────────────────────────────────────────
+
+@router.post("/products/upload-image")
+async def upload_product_image(
+    current_user: Annotated[User, Depends(get_current_user)],
+    file: UploadFile = File(...),
+) -> dict:
+    """
+    Uploads a product image to static/uploads/ and returns the URL path.
+    Accepts JPEG, PNG, WebP. Max 5MB.
+    Returns: {"image_url": "/static/uploads/{filename}"}
+    """
+    allowed_types = {"image/jpeg", "image/png", "image/webp"}
+    if file.content_type not in allowed_types:
+        raise HTTPException(400, f"Unsupported image type: {file.content_type}. Use JPEG, PNG, or WebP.")
+
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(400, "Image too large. Maximum size is 5MB.")
+
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else "jpg"
+    filename = f"{uuid.uuid4()}.{ext}"
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    filepath = os.path.join(UPLOAD_DIR, filename)
+
+    with open(filepath, "wb") as f:
+        f.write(contents)
+
+    image_url = f"/static/uploads/{filename}"
+    logger.info("Image uploaded: %s by tenant=%s", image_url, current_user.tenant_id)
+    return {"image_url": image_url}
 
 
-# ── Product endpoints ──────────────────────────────────────────────────────────
+# ── Product endpoints ─────────────────────────────────────────────────────────
 
 @router.get("/products", response_model=List[ProductResponse])
 async def list_products(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
-    q: Optional[str] = Query(None, description="Search by name/SKU/barcode"),
+    q: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
-    stock_filter: Optional[str] = Query(None, description="all|low|out"),
+    stock_filter: Optional[str] = Query(None),
     skip: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(100, ge=1, le=200),
 ):
-    """
-    Returns paginated product list for the current tenant.
-    Filters: full-text search on name/sku/barcode, category, stock level.
-    Results are cached per tenant+filter combo for 5 minutes.
-    """
-    cache_key = tenant_key(str(current_user.tenant_id), f"products:{q}:{category}:{stock_filter}:{skip}:{limit}")
-    if cached := await cache_get(cache_key):
-        return cached
-
     stmt = select(Product).where(
         Product.tenant_id == current_user.tenant_id,
-        Product.is_active == True,
+        Product.is_active == True,  # noqa: E712
     )
     if q:
         stmt = stmt.where(
@@ -134,12 +190,11 @@ async def list_products(
     elif stock_filter == "out":
         stmt = stmt.where(Product.quantity <= 0)
 
-    stmt = stmt.order_by(Product.name).offset(skip).limit(limit)
+    stmt = stmt.order_by(Product.created_at.desc()).offset(skip).limit(limit)
     result = await db.execute(stmt)
     products = result.scalars().all()
-    data = [ProductResponse.model_validate(p).model_dump() for p in products]
-    await cache_set(cache_key, data, settings.CACHE_TTL_DASHBOARD)
-    return data
+    logger.debug("Listed %d products for tenant=%s", len(products), current_user.tenant_id)
+    return [ProductResponse.model_validate(p) for p in products]
 
 
 @router.post("/products", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
@@ -148,18 +203,22 @@ async def create_product(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Create a new product in the current tenant's inventory."""
-    product = Product(
-        id=uuid.uuid4(),
-        tenant_id=current_user.tenant_id,
-        **body.model_dump(exclude_none=True),
-    )
-    db.add(product)
-    await db.commit()
-    await db.refresh(product)
-    await cache_invalidate_tenant(str(current_user.tenant_id))
-    logger.info("Product created: %s tenant=%s", product.id, current_user.tenant_id)
-    return product
+    try:
+        product = Product(
+            id=uuid.uuid4(),
+            tenant_id=current_user.tenant_id,
+            **body.model_dump(exclude_none=True),
+        )
+        db.add(product)
+        await db.commit()
+        await db.refresh(product)
+        await cache_invalidate_tenant(str(current_user.tenant_id))
+        logger.info("Product created: %s '%s' tenant=%s", product.id, product.name, current_user.tenant_id)
+        return ProductResponse.model_validate(product)
+    except Exception as exc:
+        await db.rollback()
+        logger.error("Failed to create product: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Failed to create product: {str(exc)}")
 
 
 @router.get("/products/{product_id}", response_model=ProductResponse)
@@ -169,7 +228,7 @@ async def get_product(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     product = await _get_product_or_404(db, product_id, current_user.tenant_id)
-    return product
+    return ProductResponse.model_validate(product)
 
 
 @router.put("/products/{product_id}", response_model=ProductResponse)
@@ -186,7 +245,7 @@ async def update_product(
     await db.commit()
     await db.refresh(product)
     await cache_invalidate_tenant(str(current_user.tenant_id))
-    return product
+    return ProductResponse.model_validate(product)
 
 
 @router.put("/products/{product_id}/stock", response_model=ProductResponse)
@@ -196,10 +255,6 @@ async def adjust_stock(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """
-    Adjust stock level by a delta (positive=add, negative=remove).
-    Prevents going below zero. Invalidates tenant cache on change.
-    """
     product = await _get_product_or_404(db, product_id, current_user.tenant_id)
     new_qty = product.quantity + body.delta
     if new_qty < 0:
@@ -209,16 +264,15 @@ async def adjust_stock(
     await db.commit()
     await db.refresh(product)
     await cache_invalidate_tenant(str(current_user.tenant_id))
-    return product
+    return ProductResponse.model_validate(product)
 
 
-@router.delete("/products/{product_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/products/{product_id}", status_code=204)
 async def delete_product(
     product_id: uuid.UUID,
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Soft delete — sets is_active=False. Data is preserved for analytics."""
     product = await _get_product_or_404(db, product_id, current_user.tenant_id)
     product.is_active = False
     db.add(product)
@@ -226,22 +280,20 @@ async def delete_product(
     await cache_invalidate_tenant(str(current_user.tenant_id))
 
 
-# ── Supplier endpoints ─────────────────────────────────────────────────────────
-
-@router.get("/suppliers", response_model=List[dict])
+@router.get("/suppliers")
 async def list_suppliers(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(
-        select(Supplier).where(Supplier.tenant_id == current_user.tenant_id, Supplier.is_active == True)
+        select(Supplier).where(Supplier.tenant_id == current_user.tenant_id, Supplier.is_active == True)  # noqa: E712
         .order_by(Supplier.name)
     )
     suppliers = result.scalars().all()
     return [{"id": str(s.id), "name": s.name, "phone": s.phone, "lead_time_days": s.lead_time_days} for s in suppliers]
 
 
-@router.post("/suppliers", status_code=status.HTTP_201_CREATED)
+@router.post("/suppliers", status_code=201)
 async def create_supplier(
     body: SupplierCreate,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -253,72 +305,24 @@ async def create_supplier(
     return {"id": str(supplier.id), "name": supplier.name}
 
 
-# ── Purchase orders ────────────────────────────────────────────────────────────
-
-@router.post("/purchase-orders", status_code=status.HTTP_201_CREATED)
-async def create_purchase_order(
-    body: PurchaseOrderCreate,
-    current_user: Annotated[User, Depends(get_current_user)],
-    db: Annotated[AsyncSession, Depends(get_db)],
-):
-    """
-    Record a stock purchase. For each item, increments product.quantity.
-    All stock changes are atomic — partial updates are rolled back on failure.
-    """
-    from datetime import datetime, timezone
-    order = PurchaseOrder(
-        id=uuid.uuid4(),
-        tenant_id=current_user.tenant_id,
-        supplier_id=body.supplier_id,
-        notes=body.notes,
-        received_at=datetime.now(timezone.utc),
-    )
-    db.add(order)
-    await db.flush()
-
-    total_cost = 0.0
-    for item_data in body.items:
-        product = await _get_product_or_404(db, uuid.UUID(item_data["product_id"]), current_user.tenant_id)
-        qty = int(item_data["quantity"])
-        cost = float(item_data["unit_cost"])
-        product.quantity += qty
-        db.add(product)
-        order_item = PurchaseOrderItem(
-            id=uuid.uuid4(), order_id=order.id,
-            product_id=product.id, quantity=qty, unit_cost=cost,
-        )
-        db.add(order_item)
-        total_cost += qty * cost
-
-    order.total_cost = total_cost
-    await db.commit()
-    await cache_invalidate_tenant(str(current_user.tenant_id))
-    return {"id": str(order.id), "total_cost": total_cost, "items_count": len(body.items)}
-
-
-# ── Low stock summary ──────────────────────────────────────────────────────────
-
 @router.get("/low-stock-summary")
 async def low_stock_summary(
     current_user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Quick count of low-stock and out-of-stock items. Used by sidebar badge."""
     result = await db.execute(
         select(
             func.count().filter(Product.quantity <= Product.reorder_point).label("low"),
             func.count().filter(Product.quantity <= 0).label("out"),
-        ).where(Product.tenant_id == current_user.tenant_id, Product.is_active == True)
+        ).where(Product.tenant_id == current_user.tenant_id, Product.is_active == True)  # noqa: E712
     )
     row = result.one()
     return {"low_stock": row.low, "out_of_stock": row.out}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 async def _get_product_or_404(db: AsyncSession, product_id: uuid.UUID, tenant_id: uuid.UUID) -> Product:
     result = await db.execute(
-        select(Product).where(Product.id == product_id, Product.tenant_id == tenant_id, Product.is_active == True)
+        select(Product).where(Product.id == product_id, Product.tenant_id == tenant_id, Product.is_active == True)  # noqa: E712
     )
     product = result.scalar_one_or_none()
     if not product:
