@@ -1,27 +1,15 @@
 /**
  * frontend/components/AuthProvider.tsx
- *
- * Wraps the entire app. On mount:
- *   1. Reads the access token from localStorage.
- *   2. Calls GET /api/v1/auth/me to verify it's still valid.
- *   3. If valid → hydrates Zustand user state, renders children.
- *   4. If expired → tries refresh token. Success → new tokens stored.
- *   5. If refresh also fails → clears tokens, redirects to /login.
- *
- * Auth pages (/login, /register, /auth/*) are whitelisted — they render
- * without any token check so users can reach the login page.
- *
- * Also sets up a 5-minute interval to poll /inventory/low-stock-summary
- * and update the sidebar badge count in Zustand.
+ * Updated: redirects to /onboarding if business_type not set after login.
  */
 "use client";
-
 import { useEffect, useState, useCallback } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useStore } from "@/lib/store";
 import { auth, inventory, tokenStore } from "@/lib/api";
 
-const PUBLIC_PATHS = ["/login", "/register", "/auth"];
+const PUBLIC_PATHS  = ["/login", "/register", "/auth"];
+const SKIP_ONBOARD  = ["/login", "/register", "/auth", "/onboarding"];
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const router   = useRouter();
@@ -33,16 +21,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const setLowStockCount   = useStore((s) => s.setLowStockCount);
   const setOutOfStockCount = useStore((s) => s.setOutOfStockCount);
 
-  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+  const isPublic      = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+  const skipOnboarding = SKIP_ONBOARD.some((p) => pathname.startsWith(p));
 
   const syncBadges = useCallback(async () => {
     try {
       const summary = await inventory.lowStockSummary();
       setLowStockCount(summary.low_stock);
       setOutOfStockCount(summary.out_of_stock);
-    } catch {
-      // Silent fail — badge just shows stale count
-    }
+    } catch { /* silent */ }
   }, [setLowStockCount, setOutOfStockCount]);
 
   useEffect(() => {
@@ -53,28 +40,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     auth.me()
       .then((user) => {
-        // api.ts handles token refresh internally if 401 is hit;
-        // by the time we get here the tokens are fresh
         const access  = tokenStore.getAccess()!;
         const refresh = tokenStore.getRefresh()!;
         setUser(user as Parameters<typeof setUser>[0], access, refresh);
         setReady(true);
         syncBadges();
+
+        // Redirect to onboarding if business_type not set yet
+        if (!user.business_type && !skipOnboarding) {
+          router.replace("/onboarding");
+        }
       })
       .catch(() => {
         clearAuth();
         router.replace("/login");
       });
-  }, [pathname]); // re-run on route change so deep-links are protected
+  }, [pathname]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Poll low-stock badge every 5 minutes while app is open
+  // Poll badges every 5 min
   useEffect(() => {
     if (isPublic) return;
     const id = setInterval(syncBadges, 5 * 60 * 1000);
     return () => clearInterval(id);
   }, [syncBadges, isPublic]);
 
-  // Show nothing while resolving auth — prevents flash of protected content
   if (!ready && !isPublic) {
     return (
       <div style={{
