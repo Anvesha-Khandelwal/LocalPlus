@@ -38,6 +38,5 @@ pdf2image==1.17.0
 # Utilities
 python-dotenv==1.0.1
 boto3==1.35.0
--e 
 # Static file serving
 aiofiles==23.2.1
