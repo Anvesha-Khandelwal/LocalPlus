@@ -1,26 +1,80 @@
 /* frontend/app/globals.css
-   Design tokens and global resets for the AI Business Copilot.
-   Dark navy base — feels professional, reduces eye strain for all-day use.
+   Design tokens for Dark, Light, and Adaptive themes.
+   Theme is driven by data-theme attribute on <html>.
+   Default (no attribute) = dark.
 */
 
-:root {
+/* ── Dark theme (default) ──────────────────────────────────────────────────── */
+:root,
+[data-theme="dark"] {
   --bg:        #080e1a;
   --surface:   #0d1526;
   --surface-2: #111f36;
   --border:    #1a2540;
   --border-2:  #243050;
 
-  --amber:  #f59e0b;
-  --amber-2:#fbbf24;
-  --green:  #4ade80;
-  --red:    #f87171;
-  --blue:   #60a5fa;
-  --orange: #fb923c;
+  --amber:   #f59e0b;
+  --amber-2: #fbbf24;
+  --green:   #4ade80;
+  --red:     #f87171;
+  --blue:    #60a5fa;
+  --orange:  #fb923c;
 
-  --text:   #e2e8f0;
-  --text-2: #94a3b8;
-  --muted:  #64748b;
+  --text:    #e2e8f0;
+  --text-2:  #94a3b8;
+  --muted:   #64748b;
 
+  --shadow:  0 4px 24px rgba(0,0,0,.4);
+  --color-scheme: dark;
+}
+
+/* ── Light theme ───────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg:        #f8fafc;
+  --surface:   #ffffff;
+  --surface-2: #f1f5f9;
+  --border:    #e2e8f0;
+  --border-2:  #cbd5e1;
+
+  --amber:   #d97706;
+  --amber-2: #b45309;
+  --green:   #16a34a;
+  --red:     #dc2626;
+  --blue:    #2563eb;
+  --orange:  #ea580c;
+
+  --text:    #0f172a;
+  --text-2:  #334155;
+  --muted:   #64748b;
+
+  --shadow:  0 4px 24px rgba(0,0,0,.08);
+  --color-scheme: light;
+}
+
+/* ── Adaptive — follows OS preference ─────────────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  [data-theme="adaptive"] {
+    --bg:        #f8fafc;
+    --surface:   #ffffff;
+    --surface-2: #f1f5f9;
+    --border:    #e2e8f0;
+    --border-2:  #cbd5e1;
+    --amber:     #d97706;
+    --amber-2:   #b45309;
+    --green:     #16a34a;
+    --red:       #dc2626;
+    --blue:      #2563eb;
+    --orange:    #ea580c;
+    --text:      #0f172a;
+    --text-2:    #334155;
+    --muted:     #64748b;
+    --shadow:    0 4px 24px rgba(0,0,0,.08);
+    --color-scheme: light;
+  }
+}
+
+/* ── Font variables ────────────────────────────────────────────────────────── */
+:root {
   --font-serif: 'Instrument Serif', Georgia, serif;
   --font-sans:  'Syne', system-ui, sans-serif;
   --font-mono:  'IBM Plex Mono', 'Courier New', monospace;
@@ -30,12 +84,12 @@
   --radius-lg: 14px;
 
   --sidebar-width: 240px;
-  --sidebar-collapsed: 64px;
 }
 
+/* ── Global resets ─────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { color-scheme: dark; }
+html { color-scheme: var(--color-scheme, dark); }
 
 body {
   background: var(--bg);
@@ -44,21 +98,14 @@ body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  transition: background .2s ease, color .2s ease;
 }
 
-/* App shell — sidebar + main area side by side */
-.app-shell {
-  display: flex;
-  min-height: 100vh;
-}
+/* App shell */
+.app-shell { display: flex; min-height: 100vh; }
+.main-content { flex: 1; min-width: 0; overflow-x: hidden; }
 
-.main-content {
-  flex: 1;
-  min-width: 0;            /* prevents flex child overflow */
-  overflow-x: hidden;
-}
-
-/* Scrollbar styling */
+/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 3px; }
@@ -72,11 +119,16 @@ body {
 }
 
 /* Typography */
-h1, h2, h3 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em; }
+h1, h2, h3 { font-family: var(--font-serif); font-weight: 400; letter-spacing: -0.02em; color: var(--text); }
 code, pre   { font-family: var(--font-mono); }
 
-/* Utility classes */
-.mono { font-family: var(--font-mono); }
-.serif { font-family: var(--font-serif); }
-.muted { color: var(--muted); }
+/* Utility */
+.mono     { font-family: var(--font-mono); }
+.serif    { font-family: var(--font-serif); }
+.muted    { color: var(--muted); }
 .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Smooth theme transitions on key elements */
+.card, .btn, input, textarea, select, table, th, td {
+  transition: background .2s ease, border-color .2s ease, color .15s ease;
+}

@@ -1,12 +1,6 @@
 """
 backend/app/routers/auth.py
 Changes: business_type in profile response, /business-type endpoint, fixed hash_password truncation.
-
-FIXED: removed passlib/CryptContext entirely (was causing NameError on startup because the
-import was missing, and was the root cause of the earlier "password cannot be longer than
-72 bytes" ValueError — bcrypt>=5.0.0 dropped an attribute passlib's backend-detection relies
-on). Refresh tokens and invite tokens now use the same raw `bcrypt` helpers as user passwords,
-so there's only one hashing path in this file and one less library that can break on upgrade.
 """
 import logging, secrets, uuid
 from datetime import datetime, timedelta, timezone
@@ -15,7 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-import bcrypt as _bcrypt
+from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -26,6 +20,7 @@ from app.db.session import get_db
 from app.models.user import RefreshToken, Tenant, User, UserRole
 
 logger = logging.getLogger(__name__)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=12)
 bearer_scheme = HTTPBearer(auto_error=False)
 router = APIRouter()
 
@@ -117,27 +112,12 @@ class AcceptInviteRequest(BaseModel):
 
 
 def hash_password(plain: str) -> str:
-    return _bcrypt.hashpw(plain[:72].encode(), _bcrypt.gensalt(rounds=12)).decode()
+    # bcrypt has a 72-byte limit — truncate safely
+    return pwd_context.hash(plain[:72])
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    try:
-        return _bcrypt.checkpw(plain[:72].encode(), hashed.encode())
-    except Exception:
-        return False
-
-
-def hash_token(raw: str) -> str:
-    """Same raw-bcrypt backend as user passwords. Used for refresh & invite tokens
-    instead of passlib's CryptContext, which broke under bcrypt>=5.0.0."""
-    return _bcrypt.hashpw(raw[:72].encode(), _bcrypt.gensalt(rounds=12)).decode()
-
-
-def verify_token(raw: str, hashed: str) -> bool:
-    try:
-        return _bcrypt.checkpw(raw[:72].encode(), hashed.encode())
-    except Exception:
-        return False
+    return pwd_context.verify(plain[:72], hashed)
 
 
 def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
@@ -152,7 +132,7 @@ def create_access_token(user_id: str, tenant_id: str, role: str) -> str:
 
 def create_refresh_token() -> tuple[str, str]:
     raw = secrets.token_urlsafe(64)
-    hashed = hash_token(raw)
+    hashed = pwd_context.hash(raw[:72])
     return raw, hashed
 
 
@@ -270,7 +250,7 @@ async def refresh(body: RefreshRequest, db: Annotated[AsyncSession, Depends(get_
         RefreshToken.expires_at > datetime.now(timezone.utc)))
     matched_record = None
     for record in result.scalars().all():
-        if verify_token(body.refresh_token, record.token_hash):
+        if pwd_context.verify(body.refresh_token[:72], record.token_hash):
             matched_record = record
             break
     if not matched_record:
@@ -296,7 +276,7 @@ async def logout(body: RefreshRequest, current_user: Annotated[User, Depends(get
     result = await db.execute(select(RefreshToken).where(
         RefreshToken.user_id == current_user.id, RefreshToken.token_prefix == token_prefix))
     for record in result.scalars().all():
-        if verify_token(body.refresh_token, record.token_hash):
+        if pwd_context.verify(body.refresh_token[:72], record.token_hash):
             await db.delete(record)
             break
     await db.commit()
